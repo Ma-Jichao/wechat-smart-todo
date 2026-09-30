@@ -1,0 +1,10 @@
+[Unit]
+Description=提醒系统数据库备份
+After=ivorysql.service
+Requires=ivorysql.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/reminder-bot/scripts/backup.sh
+Nice=10
+IOSchedulingClass=idle

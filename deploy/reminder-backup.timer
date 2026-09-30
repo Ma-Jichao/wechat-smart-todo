@@ -1,0 +1,11 @@
+[Unit]
+Description=每天 03:37 备份提醒系统数据库
+
+[Timer]
+# 避开 08:00 早报和其它整点任务；日界按 Asia/Shanghai
+OnCalendar=*-*-* 03:37:00 Asia/Shanghai
+Persistent=true
+Unit=reminder-backup.service
+
+[Install]
+WantedBy=timers.target

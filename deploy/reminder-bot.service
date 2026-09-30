@@ -1,0 +1,38 @@
+[Unit]
+Description=微信工作事项提醒系统（iLink + DeepSeek + IvorySQL）
+Documentation=file:/opt/reminder-bot/README.md
+After=network-online.target ivorysql.service
+Wants=network-online.target
+# 数据库不可用时也要能启动：进程内部有重连，After= 只保证启动顺序
+Requires=ivorysql.service
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=reminderbot
+Group=reminderbot
+WorkingDirectory=/opt/reminder-bot
+ExecStart=/opt/reminder-bot/venv/bin/python -m app.main --config /opt/reminder-bot/etc/config.ini
+# 退出后重启，带退避；进程内部任一关键协程退出即整体退出，由这里拉起
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+# 停服务时先发 SIGTERM，让进程发 notifystop 并关连接池
+KillSignal=SIGTERM
+
+# 最小权限加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/opt/reminder-bot/log
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
