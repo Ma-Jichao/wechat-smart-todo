@@ -10,7 +10,7 @@ import os
 import asyncio
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -150,7 +150,9 @@ async def scenario() -> None:
             rec_rows = await db.fetch_all(
                 "SELECT business_key, kind, content_snapshot FROM bot.deliveries "
                 "WHERE task_id = %s AND kind = 'recurring'", (rec.id,))
-            assert len(rec_rows) == 2 and all("记得打卡" in r["content_snapshot"] for r in rec_rows), rec_rows
+            assert len(rec_rows) == 2 and all(
+                "记得打卡" in r["content_snapshot"] and "每日提醒" in r["content_snapshot"]
+                for r in rec_rows), rec_rows
 
             rec2 = await tools.create_task(
                 db, user_id, "节假日打卡", fire_at=None, phrase=None,
@@ -161,9 +163,30 @@ async def scenario() -> None:
             scheduler._is_workday = lambda day: False
             assert await scheduler.ensure_recurring_reminders() == 0, "非工作日不应生成"
             scheduler._is_workday = orig_is_workday
+
+            # 带起止日的每日提醒：区间内生成当天投递，区间外不再生成
+            ranged = await tools.create_task(
+                db, user_id, "更新汇报", fire_at=None, phrase=None,
+                source_inbox_id=None, max_chars=2000,
+                repeat_times=["08:00"], skip_holidays=False,
+                repeat_start=date(2026, 9, 28), repeat_end=date(2026, 9, 30),
+            )
+            await scheduler.ensure_recurring_reminders()
+            ranged_rows = await db.fetch_all(
+                "SELECT business_key FROM bot.deliveries WHERE task_id = %s "
+                "AND kind = 'recurring'", (ranged.id,))
+            assert len(ranged_rows) == 1, ranged_rows  # 9月29日落在区间内
+
+            after_end = fixed_now + timedelta(days=3)  # 10月2日，区间外
+            scheduler_module.now_shanghai = lambda: after_end
+            await scheduler.ensure_recurring_reminders()
+            ranged_after = await db.fetch_one(
+                "SELECT count(*) AS n FROM bot.deliveries WHERE task_id = %s "
+                "AND kind = 'recurring'", (ranged.id,))
+            assert ranged_after["n"] == 1, "区间外不应为 ranged 新增投递"
         finally:
             scheduler_module.now_shanghai = orig_now
-        print("[通过] 每天重复提醒：工作日生成且幂等，非工作日跳过")
+        print("[通过] 每天重复提醒：工作日生成且幂等，非工作日跳过，区间外不生成")
 
         # ---- 早报生成：分组、序号映射、文本内容 -------------------------------
         await tools.create_task(db, user_id, "今天下午的事",

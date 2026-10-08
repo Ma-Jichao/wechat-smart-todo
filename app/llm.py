@@ -18,7 +18,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import aiohttp
@@ -50,6 +50,17 @@ class AmbiguousMatch(ToolError):
         super().__init__(message)
         self.candidates = candidates
 
+
+def _parse_date_arg(raw: Any) -> date | None:
+    """把工具参数里的 'YYYY-MM-DD' 解析成 date；空值返回 None，格式错抛 ToolError。"""
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        return date.fromisoformat(str(raw).strip())
+    except ValueError as exc:
+        raise ToolError(f"日期格式无法识别：{raw!r}，请用 YYYY-MM-DD。") from exc
+
+
 TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
@@ -75,7 +86,19 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "每天固定时间点重复提醒，HH:MM（24 小时制），如 [\"08:15\", \"18:00\"]。"
-                        "用户说「每天几点」时填这个，不填 fire_at。",
+                        "用户说「每天几点」时填这个，不填 fire_at。"
+                        "带起止日期的「从 X 到 Y 每天几点」用 repeat_times 配合 repeat_start/repeat_end，"
+                        "只创建一条，不要拆成多个 fire_at。",
+                    },
+                    "repeat_start": {
+                        "type": "string",
+                        "description": "每天重复提醒的起始日期，YYYY-MM-DD。"
+                        "用户说「从 X 日开始每天…」时填。",
+                    },
+                    "repeat_end": {
+                        "type": "string",
+                        "description": "每天重复提醒的结束日期（含当天），YYYY-MM-DD。"
+                        "用户说「到 Y 日为止每天…」时填。",
                     },
                     "skip_holidays": {
                         "type": "boolean",
@@ -198,7 +221,9 @@ def _system_prompt(cfg: DeepSeekConfig, now, history: list[dict[str, Any]]) -> s
         "但不要跨越无关的历史对话随意关联。",
         "10. 用户说「每天几点」「每天早上八点」「工作日打卡」「法定节假日除外」时，"
         "是每天重复的提醒：用 create_reminder 的 repeat_times（HH:MM 数组，如 [\"08:15\",\"18:00\"]）"
-        "和 skip_holidays（法定节假日除外填 true），不要用 fire_at。",
+        "和 skip_holidays（法定节假日除外填 true），不要用 fire_at。"
+        "带起止日期的「从 X 日到 Y 日每天几点」同样用 repeat_times，并填 repeat_start/repeat_end"
+        "（YYYY-MM-DD），只创建一条事项，不要拆成多个 fire_at。",
     ]
     if history:
         lines.append("")
@@ -355,6 +380,8 @@ class LlmClient:
                 raise ToolError("事项内容是空的。")
             repeat_times = [str(t).strip() for t in (args.get("repeat_times") or []) if t]
             skip_holidays = bool(args.get("skip_holidays"))
+            repeat_start = _parse_date_arg(args.get("repeat_start"))
+            repeat_end = _parse_date_arg(args.get("repeat_end"))
             no_time = bool(args.get("no_time"))
             if repeat_times:
                 fire_at = None
@@ -370,11 +397,14 @@ class LlmClient:
                 fire_at=fire_at, phrase=args.get("phrase"),
                 source_inbox_id=inbox_id, max_chars=self._max_chars,
                 repeat_times=repeat_times, skip_holidays=skip_holidays,
+                repeat_start=repeat_start, repeat_end=repeat_end,
             )
             if repeat_times:
                 result_text = f"创建成功，每天 {'、'.join(repeat_times)} 提醒" + \
                     ("，法定节假日跳过" if skip_holidays else "")
-                confirmation = [format.created_recurring(task, repeat_times, skip_holidays)]
+                confirmation = [format.created_recurring(
+                    task, repeat_times, skip_holidays,
+                    repeat_start=repeat_start, repeat_end=repeat_end)]
             else:
                 remaining = len(await tools.list_tasks(db, user_id, tools.SCOPE_ALL)) - 1
                 result_text = f"创建成功，提醒时间 {task.remind_at}"

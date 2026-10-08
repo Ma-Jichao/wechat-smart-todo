@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -181,12 +181,17 @@ def test_reminder_and_notices() -> None:
     assert "补发" in late and "原定 9月29日 15:00" in late, late
 
     rec = format.recurring("打卡")
-    assert rec.startswith("⏰ 打卡提醒") and "记得打卡" in rec, rec
+    assert rec.startswith("⏰ 每日提醒") and "记得打卡" in rec, rec
     assert "完成" not in rec, "重复提醒不应带「完成」指令"
 
     made = format.created_recurring(FakeTask(7, "打卡"), ["08:15", "18:00"], True)
     assert "每天 08:15、18:00" in made and "法定节假日" in made, made
     assert "#" not in made, made
+
+    ranged = format.created_recurring(
+        FakeTask(8, "更新汇报"), ["08:00"], False,
+        repeat_start=date(2026, 10, 1), repeat_end=date(2026, 10, 6))
+    assert "每天 08:00" in ranged and "从 10月1日 到 10月6日" in ranged, ranged
 
     assert format.needs_clarification("几点？").startswith("🤔")
     assert format.needs_clarification("**几点**？") == "🤔 几点？"

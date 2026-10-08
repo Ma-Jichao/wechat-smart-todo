@@ -132,6 +132,11 @@ class Scheduler:
         for row in tasks:
             if row["skip_holidays"] and not self._is_workday(today):
                 continue
+            start, end = row.get("repeat_start"), row.get("repeat_end")
+            if start is not None and today < start:
+                continue
+            if end is not None and today > end:
+                continue
             for hhmm in (row["repeat_times"] or []):
                 moment = self._moment_at(today, hhmm)
                 if moment is None or moment < now - LATE_REMINDER_AFTER:

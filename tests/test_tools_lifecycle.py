@@ -10,7 +10,7 @@ import os
 import asyncio
 import sys
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -182,6 +182,44 @@ async def scenario() -> None:
         rec_tasks = await tools.list_tasks(db, user_id, tools.SCOPE_RECURRING)
         assert recurring.id in [t.id for t in rec_tasks], rec_tasks
         print("[通过] 用例 10：每天重复提醒不进待办列表，可单独按 recurring 查")
+
+        # ---- 用例 11：带起止日的每天重复提醒 --------------------------------
+        ranged = await tools.create_task(
+            db, user_id, "更新汇报", fire_at=None, phrase=None,
+            source_inbox_id=None, max_chars=MAX_CHARS,
+            repeat_times=["08:00"], skip_holidays=False,
+            repeat_start=date(2026, 10, 1), repeat_end=date(2026, 10, 6),
+        )
+        assert ranged.repeat_start == date(2026, 10, 1), ranged
+        assert ranged.repeat_end == date(2026, 10, 6), ranged
+        assert ranged.remind_at is None, ranged
+        rows = await db.fetch_all(
+            "SELECT count(*) AS n FROM bot.deliveries WHERE task_id = %s", (ranged.id,))
+        assert rows[0]["n"] == 0, "重复提醒不应安排一次性到点投递"
+        all_tasks = await tools.list_tasks(db, user_id, tools.SCOPE_ALL)
+        assert ranged.id not in [t.id for t in all_tasks], all_tasks
+        rec_tasks = await tools.list_tasks(db, user_id, tools.SCOPE_RECURRING)
+        assert ranged.id in [t.id for t in rec_tasks], rec_tasks
+
+        # 起止日非法时应拒绝
+        try:
+            await tools.create_task(
+                db, user_id, "非法区间", fire_at=None, phrase=None,
+                source_inbox_id=None, max_chars=MAX_CHARS,
+                repeat_times=["08:00"], repeat_start=date(2026, 10, 6),
+                repeat_end=date(2026, 10, 1))
+            raise AssertionError("起始晚于结束应报错")
+        except ToolError as exc:
+            assert "起始日期" in str(exc), exc
+        try:
+            await tools.create_task(
+                db, user_id, "只有起止没时间", fire_at=None, phrase=None,
+                source_inbox_id=None, max_chars=MAX_CHARS,
+                repeat_start=date(2026, 10, 1))
+            raise AssertionError("只有起止日期、没有每天时间点应报错")
+        except ToolError as exc:
+            assert "每天重复" in str(exc), exc
+        print("[通过] 用例 11：带起止日的每日提醒落库、不进待办列表、非法区间被拒")
     finally:
         await cleanup()
         await db.close()

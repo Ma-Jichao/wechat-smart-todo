@@ -166,9 +166,24 @@ def created(task: Any, *, remaining: int | None = None) -> str:
     return "\n".join(lines)
 
 
-def created_recurring(task: Any, times: Iterable[str], skip_holidays: bool) -> str:
+def _cn_day(day: date) -> str:
+    return f"{day.month}月{day.day}日"
+
+
+def created_recurring(
+    task: Any,
+    times: Iterable[str],
+    skip_holidays: bool,
+    *,
+    repeat_start: date | None = None,
+    repeat_end: date | None = None,
+) -> str:
     lines = ["✅ 记好了", f"📌 {task.content}"]
     lines.append(f"🔁 每天 {'、'.join(times)} 提醒你")
+    if repeat_start is not None and repeat_end is not None:
+        lines.append(f"🗓 从 {_cn_day(repeat_start)} 到 {_cn_day(repeat_end)}")
+    elif repeat_end is not None:
+        lines.append(f"🗓 到 {_cn_day(repeat_end)} 为止")
     if skip_holidays:
         lines.append("🗓 法定节假日自动跳过")
     lines.append("")
@@ -311,8 +326,8 @@ def reminder(content: str, scheduled_at: datetime, *, late: bool) -> str:
 
 
 def recurring(content: str) -> str:
-    """重复提醒（如打卡）的到点文案。不套用「完成」指令——它不是一次性待办。"""
-    return f"⏰ 打卡提醒\n到点啦，记得{content}。"
+    """重复提醒的到点文案。不套用「完成」指令——它不是一次性待办。"""
+    return f"⏰ 每日提醒\n到点啦，记得{content}。"
 
 
 def needs_clarification(text: str) -> str:

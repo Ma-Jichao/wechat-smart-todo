@@ -55,6 +55,8 @@ class Task:
     created_at: datetime
     repeat_times: list[str] = field(default_factory=list)
     skip_holidays: bool = False
+    repeat_start: date | None = None
+    repeat_end: date | None = None
 
 
 def now_shanghai() -> datetime:
@@ -163,6 +165,8 @@ def _row_to_task(row: dict[str, Any]) -> Task:
         created_at=row["created_at"],
         repeat_times=list(row.get("repeat_times") or []),
         skip_holidays=bool(row.get("skip_holidays")),
+        repeat_start=row.get("repeat_start"),
+        repeat_end=row.get("repeat_end"),
     )
 
 
@@ -184,6 +188,8 @@ async def create_task(
     max_chars: int,
     repeat_times: Sequence[str] = (),
     skip_holidays: bool = False,
+    repeat_start: date | None = None,
+    repeat_end: date | None = None,
 ) -> Task:
     content = content.strip()
     if not content:
@@ -193,16 +199,22 @@ async def create_task(
     times = [t.strip() for t in (repeat_times or ()) if t and t.strip()]
     if times:
         fire_at = None  # 重复提醒不带一次性时间
+    if (repeat_start is not None or repeat_end is not None) and not times:
+        raise ToolError("起止日期只用于「每天重复」的提醒，请同时给出每天的时间点。")
+    if repeat_start is not None and repeat_end is not None and repeat_start > repeat_end:
+        raise ToolError("起始日期不能晚于结束日期，请与用户确认。")
 
     async with db.transaction() as cur:
         await cur.execute(
             """
             INSERT INTO bot.tasks (user_id, content, remind_at, remind_at_phrase,
-                                   source_inbox_id, repeat_times, skip_holidays)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                   source_inbox_id, repeat_times, skip_holidays,
+                                   repeat_start, repeat_end)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
-            (user_id, content, fire_at, phrase, source_inbox_id, times, skip_holidays),
+            (user_id, content, fire_at, phrase, source_inbox_id, times, skip_holidays,
+             repeat_start, repeat_end),
         )
         task = _row_to_task(await cur.fetchone())
         await _schedule_reminder(cur, task)
