@@ -202,6 +202,24 @@ def test_reminder_and_notices() -> None:
     print("[通过] 提醒与各类提示语都带图标")
 
 
+def test_assembled_reply() -> None:
+    """无工具调用的闲聊/确认消息，不该一律加 🤔 反问。"""
+    # 有确认语 + 模型追问 → 确认语在前，追问附后
+    both = format.assembled_reply(["✅ 记好了"], "请问是明天吗？")
+    assert both.startswith("✅ 记好了") and "请问是明天吗？" in both, both
+    # 有确认语 + 模型无追问 → 只回确认语，不附冗余
+    assert format.assembled_reply(["✅ 记好了"], "好的") == "✅ 记好了"
+    # 无确认语 + 追问 → 🤔 澄清
+    assert format.assembled_reply([], "几点呢？").startswith("🤔")
+    # 无确认语 + 简短确认 → 原样输出，不加 🤔（「好滴」场景）
+    assert format.assembled_reply([], "好嘞") == "好嘞"
+    # 无确认语 + 无文本 → 兜底反问
+    assert format.assembled_reply([], "").startswith("🤔")
+    # Markdown 会被剥掉
+    assert format.assembled_reply([], "**好**") == "好"
+    print("[通过] 最终回复拼装：确认/寒暄原样回应，追问才带 🤔，确认语后只附追问")
+
+
 def test_no_risky_characters_anywhere() -> None:
     """统一检查所有对外文案：无 Markdown 残留、无横线类字符、无键帽 emoji、无行首空白。"""
     now = at(29, 8, 0)
@@ -223,6 +241,9 @@ def test_no_risky_characters_anywhere() -> None:
                       closing="加油")[0],
         format.reminder("事项", at(29, 9), late=True),
         format.needs_clarification("要不要？"),
+        format.assembled_reply(["✅ 记好了"], "请问是明天吗？"),
+        format.assembled_reply([], "好嘞"),
+        format.assembled_reply([], ""),
         format.failure_notice("出错了"),
         format.system_notice("注意"),
         format.llm_failed(),
@@ -256,6 +277,7 @@ def main() -> int:
     test_list_and_empty()
     test_digest_layout()
     test_reminder_and_notices()
+    test_assembled_reply()
     test_no_risky_characters_anywhere()
     print("\n排版全部用例通过。")
     return 0

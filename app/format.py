@@ -334,6 +334,27 @@ def needs_clarification(text: str) -> str:
     return "🤔 " + strip_markdown(text)
 
 
+def assembled_reply(confirmations: list[str], model_text: str | None) -> str:
+    """把工具确认语与模型自由文本拼成最终回复。
+
+    有确认语时，模型文本只在带问号（真正在追问）时附在其后；没有确认语时，
+    带问号的模型文本加 🤔 澄清前缀，陈述类文本（如寒暄「好嘞」）原样输出、
+    不再误加 🤔。都没有时回兜底澄清句。
+    """
+    if confirmations:
+        reply = "\n".join(confirmations)
+        if model_text and ("？" in model_text or "?" in model_text):
+            reply = f"{reply}\n\n{needs_clarification(model_text)}"
+        return reply
+    if model_text:
+        if "？" in model_text or "?" in model_text:
+            return needs_clarification(model_text)
+        cleaned = strip_markdown(model_text).strip()
+        if cleaned:
+            return cleaned
+    return "🤔 我没理解你的意思，能再说一次吗？"
+
+
 def failure_notice(text: str) -> str:
     return "😥 " + strip_markdown(text)
 

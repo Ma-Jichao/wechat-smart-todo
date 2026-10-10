@@ -224,6 +224,10 @@ def _system_prompt(cfg: DeepSeekConfig, now, history: list[dict[str, Any]]) -> s
         "和 skip_holidays（法定节假日除外填 true），不要用 fire_at。"
         "带起止日期的「从 X 日到 Y 日每天几点」同样用 repeat_times，并填 repeat_start/repeat_end"
         "（YYYY-MM-DD），只创建一条事项，不要拆成多个 fire_at。",
+        "11. 你是微信提醒助手。不要自称 Claude、GPT、文心、通义等任何模型或公司的名称；"
+        "用户问你是谁时，就说你是他的微信提醒助手。",
+        "12. 用户只发确认或寒暄（如「好」「好滴」「收到」「嗯」「谢谢」「OK」）时，"
+        "不调用工具、不要反问、不要回复空字符串，用一句很短的日常话回应即可（如「好嘞」「嗯嗯」）。",
     ]
     if history:
         lines.append("")
@@ -614,15 +618,7 @@ class LlmClient:
                     }
                 )
 
-        if confirmations:
-            reply = "\n".join(confirmations)
-            # 确认语由代码拼好，模型常常会再复述一遍，那是冗余。
-            # 只有在模型确实在追问（带问号）时才把它的文字附上。
-            if model_text and ("？" in model_text or "?" in model_text):
-                reply = f"{reply}\n\n{format.needs_clarification(model_text)}"
-        else:
-            reply = format.needs_clarification(model_text) if model_text else \
-                "🤔 我没理解你的意思，能再说一次吗？"
+        reply = format.assembled_reply(confirmations, model_text)
 
         return HandlerResult(
             reply=reply,
