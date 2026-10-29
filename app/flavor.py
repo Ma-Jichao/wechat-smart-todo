@@ -108,7 +108,7 @@ def build_opening(groups: dict[str, list[Any]], generated_at: datetime) -> str:
     today = groups.get("today") or []
     overdue = groups.get("overdue") or []
     unscheduled = groups.get("unscheduled") or []
-    total = len(today) + len(overdue) + len(unscheduled)
+    total = len(today) + len(overdue) + len(unscheduled) + len(groups.get("important") or [])
     if total == 0:
         return "早上好，今天没有待办，安排自己的节奏就行。"
 
@@ -123,7 +123,7 @@ def build_opening(groups: dict[str, list[Any]], generated_at: datetime) -> str:
 
 def _fact_sheet(groups: dict[str, list[Any]], generated_at: datetime) -> str:
     lines = [f"现在是 {format_date_cn(generated_at.date())} {generated_at:%H:%M}。", "事实清单："]
-    sections = (("today", "今天要做的"), ("overdue", "逾期未完成"), ("unscheduled", "没定时间的"))
+    sections = (("important", "重要工作"), ("today", "今天要做的"), ("overdue", "逾期未完成"), ("unscheduled", "没定时间的"))
     index = 0
     for key, title in sections:
         items = groups.get(key) or []

@@ -26,6 +26,7 @@ from chinese_calendar import is_workday
 from . import flavor, format
 from .config import DigestConfig, LimitsConfig, StyleConfig, WeixinConfig
 from .db import Database
+from .important import ensure_weekly_review
 from .outbox import digest_business_key, enqueue_text, recurring_business_key, reminder_business_key
 from .tools import SHANGHAI, STATUS_OPEN, Task, group_for_digest, list_tasks, now_shanghai
 
@@ -229,7 +230,7 @@ class Scheduler:
         if self._composer is None or not self._composer.enabled:
             return code_opening, notes, None
 
-        ordered = [t for key in ("today", "overdue", "unscheduled")
+        ordered = [t for key in ("important", "today", "overdue", "unscheduled")
                    for t in (groups.get(key) or [])]
         got = await self._composer.compose(groups, generated_at, [t.id for t in ordered])
         if style.greeting and got.opening:
@@ -337,7 +338,7 @@ class Scheduler:
 
     def _section_of(self, task: Task, reference: datetime) -> str:
         groups = group_for_digest([task], reference)
-        for key in ("today", "overdue", "unscheduled"):
+        for key in ("important", "today", "overdue", "unscheduled"):
             if groups.get(key):
                 return key
         return "today"
@@ -351,6 +352,7 @@ class Scheduler:
             try:
                 await self.ensure_missing_reminders()
                 await self.ensure_recurring_reminders()
+                await ensure_weekly_review(self._db, self._weixin.allowed_user_id, now_shanghai())
 
                 if loop.time() - last_digest_check > 60:
                     last_digest_check = loop.time()

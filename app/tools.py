@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
@@ -37,6 +38,7 @@ SCOPE_OVERDUE = "overdue"
 SCOPE_UNSCHEDULED = "unscheduled"
 SCOPE_ALL = "all"
 SCOPE_RECURRING = "recurring"
+SCOPE_OVERVIEW = "overview"
 
 
 class ToolError(Exception):
@@ -57,10 +59,24 @@ class Task:
     skip_holidays: bool = False
     repeat_start: date | None = None
     repeat_end: date | None = None
+    is_important: bool = False
+    completed_at: datetime | None = None
+    review_note: str = ""
 
 
 def now_shanghai() -> datetime:
     return datetime.now(SHANGHAI)
+
+
+def task_kind(task: Task) -> str:
+    return "recurring" if task.repeat_times else "important" if task.is_important else "ordinary"
+
+
+def normalize_repeat_times(values: Sequence[str]) -> list[str]:
+    times = sorted({str(t).strip() for t in values})
+    if not times or any(not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", t) for t in times):
+        raise ToolError("请提供有效的每日提醒时间，如 08:00、18:30。")
+    return times
 
 
 def validate_fire_at(value: datetime, *, reference: datetime | None = None) -> datetime:
@@ -167,6 +183,9 @@ def _row_to_task(row: dict[str, Any]) -> Task:
         skip_holidays=bool(row.get("skip_holidays")),
         repeat_start=row.get("repeat_start"),
         repeat_end=row.get("repeat_end"),
+        is_important=bool(row.get("is_important")),
+        completed_at=row.get("completed_at"),
+        review_note=row.get("review_note") or "",
     )
 
 
@@ -190,13 +209,16 @@ async def create_task(
     skip_holidays: bool = False,
     repeat_start: date | None = None,
     repeat_end: date | None = None,
+    is_important: bool = False,
 ) -> Task:
     content = content.strip()
     if not content:
         raise ToolError("事项内容为空，请用户重新说明要记什么。")
     if len(content) > max_chars:
         raise ToolError(f"事项内容超过 {max_chars} 字上限，请用户精简后重发。")
-    times = [t.strip() for t in (repeat_times or ()) if t and t.strip()]
+    times = normalize_repeat_times(repeat_times) if repeat_times else []
+    if is_important and times:
+        raise ToolError("重要工作默认进入每日早报，请不要同时设置每日重复提醒。")
     if times:
         fire_at = None  # 重复提醒不带一次性时间
     if (repeat_start is not None or repeat_end is not None) and not times:
@@ -205,19 +227,47 @@ async def create_task(
         raise ToolError("起始日期不能晚于结束日期，请与用户确认。")
 
     async with db.transaction() as cur:
+        # 同一用户的创建串行化：防止工具重试或并发处理在查重后同时插入。
+        await cur.execute(
+            "SELECT pg_advisory_xact_lock(hashtext('reminder-create'), hashtext(%s))",
+            (user_id,),
+        )
+        await cur.execute(
+            """
+            SELECT id FROM bot.tasks
+            WHERE user_id = %s AND status = 'open' AND content = %s
+              AND remind_at IS NOT DISTINCT FROM %s::timestamptz
+              AND repeat_times @> %s::text[] AND repeat_times <@ %s::text[]
+              AND skip_holidays = %s
+              AND repeat_start IS NOT DISTINCT FROM %s::date
+              AND repeat_end IS NOT DISTINCT FROM %s::date
+              AND is_important = %s
+            LIMIT 1
+            """,
+            (user_id, content, fire_at, times, times, skip_holidays,
+             repeat_start, repeat_end, is_important),
+        )
+        if await cur.fetchone():
+            raise ToolError(
+                f"已有相同内容和提醒设置的未完成事项「{content}」，本次未重复创建。"
+                "请告知用户已存在；不要再次创建，也不要自行改写内容或时间绕过检查。"
+            )
         await cur.execute(
             """
             INSERT INTO bot.tasks (user_id, content, remind_at, remind_at_phrase,
                                    source_inbox_id, repeat_times, skip_holidays,
-                                   repeat_start, repeat_end)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   repeat_start, repeat_end, is_important)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (user_id, content, fire_at, phrase, source_inbox_id, times, skip_holidays,
-             repeat_start, repeat_end),
+             repeat_start, repeat_end, is_important),
         )
         task = _row_to_task(await cur.fetchone())
         await _schedule_reminder(cur, task)
+        if is_important:
+            await cur.execute("INSERT INTO bot.work_review_settings (user_id) VALUES (%s) "
+                              "ON CONFLICT (user_id) DO NOTHING", (user_id,))
         await cur.execute(
             "INSERT INTO bot.task_changes (task_id, field, new_value, source_inbox_id, reason) "
             "VALUES (%s, 'created', %s, %s, 'create_reminder')",
@@ -240,6 +290,13 @@ async def list_tasks(
 ) -> list[Task]:
     anchor = (reference or now_shanghai()).astimezone(SHANGHAI)
     today = anchor.date()
+
+    if scope == SCOPE_OVERVIEW:
+        rows = await db.fetch_all(
+            "SELECT * FROM bot.tasks WHERE user_id = %s AND status = 'open' ORDER BY id",
+            (user_id,),
+        )
+        return [_row_to_task(r) for r in rows]
 
     if scope == SCOPE_RECURRING:
         rows = await db.fetch_all(
@@ -286,7 +343,7 @@ async def find_tasks_by_content(db: Database, user_id: str, keyword: str) -> lis
         WHERE user_id = %s AND status = 'open' AND content ILIKE %s
         ORDER BY created_at DESC
         """,
-        (user_id, f"%{keyword}%"),
+        (user_id, "%" + keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"),
     )
     return [_row_to_task(r) for r in rows]
 
@@ -301,14 +358,27 @@ async def update_task(
     clear_time: bool = False,
     phrase: str | None = None,
     source_inbox_id: int | None = None,
+    repeat_times: Sequence[str] | None = None,
+    stop_reminders: bool = False,
 ) -> Task:
     current = await get_task(db, user_id, task_id)
     if current is None:
         raise ToolError("没找到你要改的那件事，能再说清楚一点吗（比如说出事项内容）？")
     if current.status != STATUS_OPEN:
         raise ToolError(f"这件事已经是「{current.status}」状态，不能再修改。")
-    if content is None and fire_at is None and not clear_time:
+    if content is None and fire_at is None and not clear_time and repeat_times is None and not stop_reminders:
         raise ToolError("没有给出要修改的内容或时间。")
+    if current.repeat_times and (fire_at is not None or clear_time) and not stop_reminders:
+        raise ToolError("这是每日重复提醒。改时刻请说明每天几点；只停止提醒时请明确说明保留事项。")
+    if repeat_times is not None and not current.repeat_times:
+        raise ToolError("这不是每日重复提醒，不能直接改成重复事项。请先确认用户意图。")
+    if stop_reminders and (fire_at is not None or repeat_times is not None):
+        raise ToolError("停止提醒不能同时设置新的提醒时间。")
+    times = normalize_repeat_times(repeat_times) if repeat_times is not None else current.repeat_times
+    start, end, holidays = current.repeat_start, current.repeat_end, current.skip_holidays
+    if stop_reminders:
+        times, start, end, holidays = [], None, None, False
+        clear_time = True
 
     new_content = current.content if content is None else content.strip()
     if not new_content:
@@ -326,13 +396,18 @@ async def update_task(
             UPDATE bot.tasks
             SET content = %s, remind_at = %s,
                 remind_at_phrase = COALESCE(%s, remind_at_phrase),
+                repeat_times = %s, repeat_start = %s, repeat_end = %s, skip_holidays = %s,
                 version = version + 1, updated_at = now()
-            WHERE id = %s AND user_id = %s
+            WHERE id = %s AND user_id = %s AND status = 'open' AND version = %s
             RETURNING *
             """,
-            (new_content, new_remind, phrase, task_id, user_id),
+            (new_content, new_remind, phrase, times, start, end, holidays,
+             task_id, user_id, current.version),
         )
-        task = _row_to_task(await cur.fetchone())
+        row = await cur.fetchone()
+        if row is None:
+            raise ToolError("事项状态刚刚发生变化，本次没有修改，请重新查询后再操作。")
+        task = _row_to_task(row)
         # 先作废旧投递，再为同一事务内的新版本安排投递
         await _supersede_deliveries(cur, task.id, task.version)
         await _schedule_reminder(cur, task)
@@ -347,6 +422,12 @@ async def update_task(
                 "INSERT INTO bot.task_changes (task_id, field, old_value, new_value, "
                 "source_inbox_id, reason) VALUES (%s, 'remind_at', %s, %s, %s, 'update_reminder')",
                 (task.id, str(current.remind_at), str(new_remind), source_inbox_id),
+            )
+        if times != current.repeat_times or stop_reminders:
+            await cur.execute(
+                "INSERT INTO bot.task_changes (task_id, field, old_value, new_value, source_inbox_id, reason) "
+                "VALUES (%s, 'repeat_times', %s, %s, %s, 'update_reminder')",
+                (task.id, str(current.repeat_times), str(times), source_inbox_id),
             )
     log.info("修改事项 #%s 到 v%s", task.id, task.version)
     return task
@@ -381,7 +462,8 @@ async def _close_task(db: Database, user_id: str, task_id: int, status: str) -> 
             existing = await cur.fetchone()
             if existing is None:
                 raise ToolError("没找到你要操作的那件事，能再说清楚一点吗？")
-            raise ToolError(f"这件事已经是「{existing['status']}」状态。")
+            state = {STATUS_COMPLETED: "已完成", STATUS_CANCELED: "已取消"}.get(existing['status'], "非待办")
+            raise ToolError(f"这件事已经是「{state}」状态，本次没有再次修改。")
         task = _row_to_task(row)
         # 完成后立刻停止该事项后续到点提醒；保留审计记录，不删除
         await cur.execute(
@@ -447,9 +529,12 @@ def group_for_digest(tasks: Iterable[Task], reference: datetime) -> dict[str, li
     """
     anchor = reference.astimezone(SHANGHAI)
     today = anchor.date()
-    groups: dict[str, list[Task]] = {SCOPE_TODAY: [], SCOPE_OVERDUE: [], SCOPE_UNSCHEDULED: []}
+    groups: dict[str, list[Task]] = {"important": [], SCOPE_TODAY: [], SCOPE_OVERDUE: [], SCOPE_UNSCHEDULED: []}
     for task in tasks:
         if task.status != STATUS_OPEN:
+            continue
+        if getattr(task, "is_important", False):
+            groups["important"].append(task)
             continue
         if getattr(task, "repeat_times", None):
             continue  # 重复提醒不进早报，到点单独发

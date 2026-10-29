@@ -16,7 +16,7 @@
 
 几条硬规矩（都写过测试守着）：
 
-  * 清单**顶格、连续编号**，中间不插标题或空段，不让别的内容把它往下挤。
+  * 清单顶格、连续编号；重要工作单列在最前，其余事项保持原有排版。
   * 序号用 `1.` 而不是键帽 emoji `1⃣`——部分客户端会把键帽渲染成「数字+方框」
     或宽窄不一。
   * 点评独立成行、行首用 `↳`；**不用空格缩进**，因为微信会吃掉行首空白。
@@ -119,15 +119,19 @@ def item_line(index: int, task: Any, reference: datetime) -> str:
     今天的事只写时刻——标题里已经有日期了，重复写会变吵。
     内部自增编号不进用户界面；要指代某条时用显示序号或关键词。
     """
+    if getattr(task, "repeat_times", None):
+        return f"{index}. 🔁 每日重复 {'、'.join(task.repeat_times)} {task.content}"
     if task.remind_at is None:
-        return f"{index}. 未定时间 {task.content}"
+        label = "⭐ 重要工作" if getattr(task, "is_important", False) else "未定时间"
+        return f"{index}. {label} {task.content}"
     days = overdue_days(task, reference)
     if days:
-        return f"{index}. ⚠️ 逾期 {days} 天 {task.content}"
+        return f"{index}. {'⭐ 重要工作 ' if getattr(task, 'is_important', False) else ''}⚠️ 逾期 {days} 天 {task.content}"
     moment = task.remind_at.astimezone(SHANGHAI)
     prefix = format_time(moment) if moment.date() == reference.astimezone(SHANGHAI).date() \
         else f"{day_label(moment, reference)} {format_time(moment)}"
-    return f"{index}. {prefix} {task.content}"
+    mark = "⭐ 重要工作 " if getattr(task, "is_important", False) else ""
+    return f"{index}. {mark}{prefix} {task.content}"
 
 
 def item_fact_note(task: Any, reference: datetime) -> str | None:
@@ -153,7 +157,12 @@ def _item_block(index: int, task: Any, reference: datetime,
 # ---------------------------------------------------------------------------
 def created(task: Any, *, remaining: int | None = None) -> str:
     lines = ["✅ 记好了", f"📌 {task.content}"]
-    if task.remind_at is None:
+    if getattr(task, "is_important", False):
+        lines.append("⭐ 已加入重要工作，每天北京时间 08:00 在早报中提醒，直到完成或取消")
+        if task.remind_at is not None:
+            lines.append(f"⏰ 另设提醒：{format_datetime(task.remind_at)}（北京时间）")
+        lines.append("完成后保留记录，可随时复盘；每周汇总时间可查询和修改。")
+    elif task.remind_at is None:
         lines.append("📝 没设提醒时间，我会放进每天早报里")
         lines.append("")
         lines.append("想加个时间随时说，比如「明天下午三点提醒我」")
@@ -191,31 +200,66 @@ def created_recurring(
     return "\n".join(lines)
 
 
-def updated(task: Any) -> str:
+def task_details(task: Any) -> str:
+    if getattr(task, "repeat_times", None):
+        text = "每日重复 " + "、".join(task.repeat_times) + "（北京时间）"
+        if getattr(task, "skip_holidays", False):
+            text += "，跳过法定节假日"
+        for key, label in (("repeat_start", "起始"), ("repeat_end", "截至")):
+            day = getattr(task, key, None)
+            if day:
+                text += f"，{label}{day:%Y年%m月%d日}"
+        return text
+    label = "重要工作，每日早报保留" if getattr(task, "is_important", False) else "普通待办"
+    if task.remind_at is not None:
+        return f"{label}，独立提醒 {format_datetime(task.remind_at)}（北京时间）"
+    return f"{label}，未设独立提醒"
+
+
+def candidate(task: Any) -> dict[str, Any]:
+    state = {"open": "未完成", "completed": "已完成", "canceled": "已取消"}.get(task.status, task.status)
+    return {"id": task.id, "content": task.content, "detail": f"{task_details(task)}，{state}"}
+
+
+def choose_task(candidates: list[dict[str, Any]]) -> str:
+    if not candidates:
+        return "🤔 没有找到匹配的事项，本次没有修改。请说出事项名称。"
+    lines = ["🤔 请确认要操作哪一条，本次尚未修改："]
+    for i, item in enumerate(candidates, 1):
+        lines.extend([f"{i}. {item['content']}", f"↳ {item.get('detail', '请按名称确认')}"])
+    lines.append("回复「第几个」，例如「第2个」。")
+    return "\n".join(lines)
+
+
+def updated(task: Any, *, before: Any = None, stopped: bool = False) -> str:
     lines = ["✏️ 改好了", f"📌 {task.content}"]
-    if task.remind_at is None:
-        lines.append("📝 提醒时间去掉了，改为只在早报里列出")
-    else:
-        lines.append(f"⏰ {format_datetime(task.remind_at)}（北京时间）")
-    lines.append("")
-    lines.append("新时间记下了，旧的那次不会再提醒你。")
+    if before is not None:
+        lines.append(f"原设置：{task_details(before)}")
+    lines.append(f"现设置：{task_details(task)}")
+    if stopped:
+        lines.append("已停止独立的到点/每日重复提醒，事项保留在早报中，未标记完成。")
+    lines.append("旧设置下尚未发送的独立提醒已作废，历史记录保留。")
     return "\n".join(lines)
 
 
 def completed(task: Any, *, remaining: int | None = None) -> str:
-    lines = ["✅ 完成", f"📌 {task.content}", ""]
+    lines = ["✅ 完成", f"📌 {task.content}", task_details(task), ""]
     if remaining is None:
         lines.append("这件结了 👍")
     elif remaining == 0:
         lines.append("这件结了，手上清空了 🎉")
     else:
         lines.append(f"这件结了。还有 {remaining} 件在盯着。")
+    if getattr(task, "is_important", False):
+        lines.append("重要工作已停止每日提醒，记录保留在复盘中。")
+    else:
+        lines.append("该事项后续提醒已停止，历史记录保留。")
     return "\n".join(lines)
 
 
 def canceled(task: Any) -> str:
-    return (f"🚫 取消了\n📌 {task.content}\n\n"
-            "这条不再提醒你。记录我给你留着，想恢复随时说。")
+    return (f"🚫 取消了\n📌 {task.content}\n{task_details(task)}\n\n"
+            "该事项已取消，后续提醒已停止，不再进入待办早报；历史记录保留。")
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +281,36 @@ def task_list(tasks: Iterable[Any], title: str = "手上的待办",
     lines = [f"📋 {title} {len(items)} 件", ""]
     for index, task in enumerate(items, start=1):
         lines.extend(_item_block(index, task, now, None))
+        if getattr(task, "repeat_times", None):
+            lines.append(f"↳ {task_details(task)}")
     lines.append("")
     lines.append(complete_hint(len(items)))
     return "\n".join(lines)
+
+
+def reminder_overview(tasks: list[Any], weekly: dict[str, Any] | None,
+                      hour: int, minute: int) -> tuple[str, list[Any]]:
+    lines = ["📋 全部提醒与设置"]
+    ordered = []
+    for label, items in (
+        ("⭐ 重要工作", [t for t in tasks if getattr(t, "is_important", False)]),
+        ("📝 普通待办", [t for t in tasks if not getattr(t, "is_important", False) and not getattr(t, "repeat_times", None)]),
+        ("🔁 每日重复提醒", [t for t in tasks if getattr(t, "repeat_times", None)]),
+    ):
+        lines.extend(["", f"{label} {len(items)} 件"])
+        for task in items:
+            ordered.append(task)
+            lines.extend([f"{len(ordered)}. {task.content}", f"↳ {task_details(task)}"])
+    lines.extend(["", f"☀️ 待办早报：每天 {hour:02d}:{minute:02d}（北京时间）"])
+    if weekly is None:
+        lines.append("📅 重要工作每周汇总：尚未启用")
+    else:
+        state = "开启" if weekly['enabled'] else "关闭"
+        lines.append(f"📅 重要工作每周汇总：{state}")
+        lines.append(f"每周{WEEKDAY_CN[weekly['weekday']]} {weekly['hour']:02d}:{weekly['minute']:02d}（北京时间）")
+    if ordered:
+        lines.append("回复「完成 N」「取消 N」操作本清单；停止独立提醒并保留事项请明确说明。")
+    return "\n".join(lines), ordered
 
 
 def empty_scope(scope: str) -> str:
@@ -247,6 +318,7 @@ def empty_scope(scope: str) -> str:
         "today": "🎉 今天没有待办，轻松一点",
         "overdue": "🎉 没有逾期的事，保持住",
         "unscheduled": "🎉 没有挂着的事",
+        "recurring": "🔁 当前没有独立每日重复提醒；重要工作仍按早报设置列出。",
     }.get(scope, "🎉 手上没有未完成的事")
 
 
@@ -274,17 +346,21 @@ def digest(
         <空行>
         （温度层的问候与鼓励）
 
-    要点：清单顶格连续编号、中间不插任何标题；分组信息退到行内标记；
+    要点：清单顶格连续编号；重要工作单列，其余分组信息用行内标记；
     点评独立成行用 ↳ 而不是空格缩进；感叹/问候一律放在清单之后。
     """
     ordered: list[Any] = []
-    for key in (SECTION_TODAY, SECTION_OVERDUE, SECTION_UNSCHEDULED):
+    for key in ("important", SECTION_TODAY, SECTION_OVERDUE, SECTION_UNSCHEDULED):
         ordered.extend(groups.get(key) or [])
 
     header = f"☀️ {format_date_cn(generated_at.date())} · 今日待办 {len(ordered)} 件"
 
     lines: list[str] = []
     for index, task in enumerate(ordered, start=1):
+        if getattr(task, "is_important", False) and index == 1:
+            lines.append("⭐ 重要工作")
+        elif index > 1 and getattr(ordered[index - 2], "is_important", False) and not getattr(task, "is_important", False):
+            lines.extend(["", "其他待办"])
         lines.extend(_item_block(index, task, generated_at, notes))
 
     footer: list[str] = []

@@ -76,7 +76,7 @@ def test_confirmations() -> None:
 
     upd = format.updated(FakeTask(12, "整理项目材料", at(30, 9, 30)))
     assert upd.startswith("✏️") and "2026年9月30日（周三）09:30" in upd, upd
-    assert "旧的那次不会再提醒" in upd, upd
+    assert "尚未发送的独立提醒已作废" in upd, upd
 
     assert "手上清空了" in format.completed(FakeTask(1, "x"), remaining=0)
     assert "还有 2 件" in format.completed(FakeTask(1, "x"), remaining=2)

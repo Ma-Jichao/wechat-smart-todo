@@ -301,7 +301,8 @@ async def run_all(cfg: Config) -> int:
 
     adapter = WeixinAdapter(cfg.weixin, db)
     sender = DeliverySender(db, cfg.weixin, cfg.delivery, cfg.limits)
-    llm = LlmClient(cfg.deepseek, cfg.limits.max_text_chars, cfg.limits.clarify_ttl_minutes)
+    llm = LlmClient(cfg.deepseek, cfg.limits.max_text_chars, cfg.limits.clarify_ttl_minutes,
+                    digest_hour=cfg.digest.hour, digest_minute=cfg.digest.minute)
     style_enabled = cfg.style.greeting or cfg.style.per_item_note or cfg.style.closing
     composer = flavor.FlavorComposer(
         llm, enabled=style_enabled, model=cfg.style.model, max_tokens=cfg.style.max_tokens

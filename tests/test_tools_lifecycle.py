@@ -20,6 +20,8 @@ from app import tools
 from app.config import load
 from app.db import Database
 from app.tools import ToolError
+from app.llm import LlmClient
+from types import SimpleNamespace
 
 MAX_CHARS = 2000
 
@@ -41,9 +43,31 @@ async def scenario() -> None:
         )
         await db.execute("DELETE FROM bot.tasks WHERE user_id = %s", (user_id,))
         await db.execute("DELETE FROM bot.messages_seen WHERE user_id = %s", (user_id,))
+        await db.execute("DELETE FROM bot.conversations WHERE user_id = %s", (user_id,))
+        await db.execute("DELETE FROM bot.work_review_settings WHERE user_id = %s", (user_id,))
 
     try:
         now = tools.now_shanghai()
+        # 同一内容、同一时间的并发工具调用只能落一条；不同时间允许创建。
+        async def create_same(moment):
+            return await tools.create_task(
+                db, user_id, "并发去重测试", fire_at=moment, phrase=None,
+                source_inbox_id=None, max_chars=MAX_CHARS)
+
+        results = await asyncio.gather(
+            create_same(now + timedelta(days=1)),
+            create_same(now + timedelta(days=1)), return_exceptions=True)
+        assert sum(isinstance(r, tools.Task) for r in results) == 1, results
+        assert sum(isinstance(r, ToolError) for r in results) == 1, results
+        first = next(r for r in results if isinstance(r, tools.Task))
+        second = await create_same(now + timedelta(days=2))
+        assert first.id != second.id
+        await tools.cancel_task(db, user_id, first.id)
+        recreated = await create_same(now + timedelta(days=1))
+        assert recreated.id != first.id
+        await tools.cancel_task(db, user_id, second.id)
+        await tools.cancel_task(db, user_id, recreated.id)
+        print("[通过] 并发创建去重、不同时间保留、取消后允许重新创建")
         # 分组与建事项都锚在「当天 08:00」，避免测试依赖运行时刻
         # （晚上跑的话 now+2h 会跨到第二天，today 分组就空了）
         anchor = now.replace(hour=8, minute=0, second=0, microsecond=0)
@@ -220,6 +244,38 @@ async def scenario() -> None:
         except ToolError as exc:
             assert "每天重复" in str(exc), exc
         print("[通过] 用例 11：带起止日的每日提醒落库、不进待办列表、非法区间被拒")
+
+        # 完整事务路径：重复时刻修改、停止独立提醒、同名类型定位与统一查询。
+        moved_repeat = await tools.update_task(db, user_id, recurring.id, repeat_times=["09:30"])
+        assert moved_repeat.repeat_times == ["09:30"] and moved_repeat.skip_holidays
+        stopped = await tools.update_task(db, user_id, ranged.id, stop_reminders=True)
+        assert stopped.status == "open" and not stopped.repeat_times
+        assert stopped.repeat_start is None and stopped.repeat_end is None
+        work = await tools.create_task(
+            db, user_id, "同名类型测试", fire_at=now+timedelta(days=1), phrase=None,
+            source_inbox_id=None, max_chars=MAX_CHARS, is_important=True)
+        work = await tools.update_task(db, user_id, work.id, stop_reminders=True)
+        assert work.is_important and work.status == "open" and work.remind_at is None
+        live = await db.fetch_one(
+            "SELECT count(*) AS n FROM bot.deliveries WHERE task_id=%s AND status=ANY(%s)",
+            (work.id, list(tools.LIVE_DELIVERY_STATUS)))
+        assert live["n"] == 0
+        daily = await tools.create_task(
+            db, user_id, work.content, fire_at=None, phrase=None,
+            source_inbox_id=None, max_chars=MAX_CHARS, repeat_times=["08:00"])
+        client = LlmClient(SimpleNamespace(), MAX_CHARS, 30)
+        _, confirmations, ids = await client._run_tool(db, user_id, "cancel_reminder",
+            {"match_text": work.content, "task_type": "recurring"}, inbox_id=None, pending=None)
+        assert ids == [daily.id] and "仍保留同名事项：重要工作" in confirmations[0]
+        assert (await tools.get_task(db, user_id, work.id)).status == "open"
+        _, confirmations, ids = await client._run_tool(db, user_id, "list_reminders",
+            {"scope": "overview"}, inbox_id=None, pending=None)
+        assert work.id in ids and recurring.id in ids and daily.id not in ids
+        assert "每周汇总" in confirmations[0] and "待办早报" in confirmations[0]
+        await client._save_pending(db, user_id, {"listing": ids})
+        restored = await LlmClient(SimpleNamespace(), MAX_CHARS, 30)._load_pending(db, user_id)
+        assert restored["listing"] == ids
+        print("[通过] 修改重复时刻、停止提醒保留工作、同名类型取消、统一查询与序号持久化")
     finally:
         await cleanup()
         await db.close()
